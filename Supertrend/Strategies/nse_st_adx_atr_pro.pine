@@ -1,0 +1,226 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82
+
+//@version=6
+strategy(title = "NSE ST_ADX_ATR_Pro", overlay = true, default_qty_type = strategy.fixed, default_qty_value = 5, commission_type  = strategy.commission.percent,commission_value = 0.03, pyramiding = 1 )
+
+//---------------------------------------------------------------------
+// 1) USER INPUTS
+//---------------------------------------------------------------------
+groupSt  = "Supertrend Settings"
+groupAdx = "ADX Filter"
+groupAtr = "ATR Exits"
+groupUI  = "Stats & UI"
+
+strategyType = input.string("intraday",  "Strategy Type", options=["intraday","swing","long_term"])
+orderType    = input.string("market",    "Order Type",    options=["market","limit"])
+
+stAtrLength = input.int(10, title="Supertrend ATR Length", group=groupSt)
+stFactor    = input.float(1.2, title="Supertrend Factor", step=0.1, group=groupSt)
+
+adxLength   = input.int(14, title="ADX Length", group = groupAdx)
+adxThreshold= input.int(20, title="Min ADX Threshold for Trading", group = groupAdx)
+
+exitAtrLength= input.int(14, title="Exit ATR Length", group=groupAtr)
+slMultiplier = input.float(1.5, title="SL ATR Multiplier", step=0.1, group=groupAtr)
+tpMultiplier = input.float(3.0, title="TP ATR Multiplier", step=0.1, group=groupAtr)
+
+showSLLines   = input.bool(false, title="Show SL Lines?",   group=groupUI)
+showTPLines   = input.bool(true, title="Show TP Lines?",   group=groupUI)
+
+// ─────────────────── SESSION FILTER (IST) ───────────────────
+istHour   = hour(time + 19800000)           // UTC➜IST
+sessionOK = istHour >= 6 and istHour < 22   // 06:00‑22:00 IST
+
+// ────────────── HIGHER‑TIMEFRAME TREND CONFIRM ──────────────
+useHTF    = input.bool(true,  "Use 1 h EMA200 Trend")
+htfEMA    = request.security(syminfo.tickerid, "60", ta.ema(close, 200))
+trendUp   = close > htfEMA
+trendDwn  = close < htfEMA
+
+useAtrExits = input.bool(true, "Use atr based exits ?")
+
+// ─────────────── VOLATILITY (ATR) THROTTLE ──────────────────
+atrNow    = ta.atr(14)
+atrMean   = ta.sma(atrNow, 100)
+volOK     = atrNow < 2 * atrMean
+
+strategyTitle = "ST - ATR - ADX PRO"
+
+//───────────────────────────────────────────────────────────────
+//  JSON alert builder tailored to Rails strong‑params list
+//───────────────────────────────────────────────────────────────
+jsonAlert(_signal, _action, _currPos, _prevPos) =>
+    '{ "alert": {'  + '"ticker":"' + syminfo.ticker + '",' + '"instrument_type":"' + syminfo.type + '",' +'"exchange":"' + syminfo.prefix + '",' +'"time":"' + str.format_time(time, "yyyy-MM-dd\'T\'HH:mm:ssZ", syminfo.timezone) + '",' + '"strategy_type":"' +  strategyType + '",' + '"order_type":"'        + orderType  + '",' + '"action":"' + _action + '",' + '"current_position":"'  + _currPos + '",' + '"previous_position":"' + _prevPos  + '",' + '"current_price":' + str.tostring(close, "#.##") + ','  + '"chart_interval":"' + timeframe.period + '",' + '"strategy_name":"' + strategyTitle + '",' + '"strategy_id":"' + syminfo.ticker + "_" + strategyType + '",' + '"signal_type":"' + _signal + '"'+'} }'
+
+
+//---------------------------------------------------------------------
+// 2) SUPERTREND CALCULATION
+//---------------------------------------------------------------------
+// Built-in function: ta.supertrend() returns [float, int] => [supertrend, direction]
+[stValue, stDir] = ta.supertrend(stFactor, stAtrLength)
+// If stDir < 0 => bullish, if stDir > 0 => bearish
+
+bool isBullish = (stDir < 0)
+bool isBearish = (stDir > 0)
+
+// We'll detect direction changes:
+dirChange = ta.change(stDir)
+
+//---------------------------------------------------------------------
+// 3) ADX FILTER
+//---------------------------------------------------------------------
+[plusDI, minusDI, adxValue] = ta.dmi(adxLength, adxLength)
+bool isTrending = adxValue > adxThreshold
+
+//---------------------------------------------------------------------
+// 4) ENTRY CONDITIONS
+//---------------------------------------------------------------------
+// For a simpler approach:
+// - Go long if Supertrend is bullish and the ADX is above the threshold
+// - Go short if Supertrend is bearish and ADX is above the threshold
+// bool longCondition  = isBullish and isTrending and dirChange < 0
+// bool shortCondition = isBearish and isTrending and dirChange > 0
+
+longCondition  = isBullish and dirChange < 0 and isTrending and sessionOK and volOK and (not useHTF or trendUp)
+shortCondition = isBearish and dirChange > 0 and isTrending and sessionOK and volOK and (not useHTF or trendDwn)
+
+
+riskPct = input.float(1, "Risk % per Trade", step=0.25)   // 1 %= default
+exitATR   = ta.atr(exitAtrLength)
+slTicks   = slMultiplier * exitATR
+posVal  = (strategy.equity * riskPct/100) / (slTicks/close)
+
+// Convert USD value to contracts
+contracts = posVal / close
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+//---------------------------------------------------------------------
+// 5) ATR-BASED STOPS
+//---------------------------------------------------------------------
+float exitAtr = ta.atr(exitAtrLength)
+
+// For a long position, let's define the stop-loss and take-profit
+float longStop = strategy.position_avg_price - (slMultiplier * exitAtr)
+float longTP = strategy.position_avg_price + (tpMultiplier * exitAtr)
+
+// For a short position
+float shortStop = strategy.position_avg_price + (slMultiplier * exitAtr)
+float shortTP = strategy.position_avg_price - (tpMultiplier * exitAtr)
+
+// We call strategy.exit() to enforce those stops:
+if useAtrExits and strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry = "Long", stop = longStop, limit = longTP)
+
+if useAtrExits and strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry = "Short", stop = shortStop, limit = shortTP)
+
+// // ─── 5) ATR‑BASED *TRAILING* STOPS ───────────────────────────
+// var float trailLong = na
+// var float trailShort = na
+// exitATR = ta.atr(exitAtrLength)
+
+// // Update trailing stop every bar
+// if strategy.position_size > 0          // long
+//     trailLong := na(trailLong[1]) ? strategy.position_avg_price - slMultiplier*exitATR :
+//                  math.max(trailLong[1],  close - slMultiplier*exitATR)
+
+// if strategy.position_size < 0          // short
+//     trailShort := na(trailShort[1]) ? strategy.position_avg_price + slMultiplier*exitATR :
+//                   math.min(trailShort[1], close + slMultiplier*exitATR)
+
+// // Exit only when price crosses the trail
+// if strategy.position_size > 0
+//     strategy.exit("Long‑Trail", from_entry = "Long", stop = trailLong)
+
+// if strategy.position_size < 0
+//     strategy.exit("Short‑Trail", from_entry = "Short", stop = trailShort)
+
+// if strategy.position_size > 0 and isBearish and dirChange > 0
+//     strategy.close("Long-ST‑flip")     // exit long
+
+// if strategy.position_size < 0 and isBullish and dirChange < 0
+//     strategy.close("Short-ST‑flip")    // exit short
+
+
+// Helper to convert qty → "long" | "short" | "flat"
+posLabel(qty) =>
+    qty > 0  ? "long" : qty < 0  ? "short" : "flat"
+
+//─────────────────────  TRIGGERS  ──────────────────────────────
+var string NONE = "none"   // fallback
+
+prevPosStr = posLabel(strategy.position_size[1])
+currPosStr = posLabel(strategy.position_size)
+
+// ENTRY
+if longCondition
+    alert(jsonAlert("long_entry", "buy", "long", prevPosStr), alert.freq_once_per_bar_close)
+
+if shortCondition
+    alert(jsonAlert("short_entry", "sell", "short", prevPosStr), alert.freq_once_per_bar_close)
+
+// EXIT  (after strategy.exit() closes the trade)
+if strategy.position_size == 0 and strategy.position_size[1] > 0
+    alert(jsonAlert("long_exit", "sell", "flat" , "long"),  alert.freq_once_per_bar_close)
+
+if strategy.position_size == 0 and strategy.position_size[1] < 0
+    alert(jsonAlert("short_exit", "buy" , "flat" , "short"), alert.freq_once_per_bar_close)
+
+//---------------------------------------------------------------------
+// 6) PLOT: SUPERTREND LINES
+//---------------------------------------------------------------------
+// We'll show green for bullish line, red for bearish line
+plot(isBullish ? stValue : na, title     = "Supertrend (Bullish)", color     = color.new(color.green, 0),style     = plot.style_linebr,linewidth = 2)
+plot(isBearish ? stValue : na, title     = "Supertrend (Bearish)", color     = color.new(color.red, 0),style     = plot.style_linebr,linewidth = 2)
+
+// // OPTIONAL: Plot the stop/TP lines for a better visual
+// plot(showSLLines and strategy.position_size > 0 ? longStop : na, title = "Long SL", color = color.red, style = plot.style_linebr)
+// plot(showTPLines and strategy.position_size > 0 ? longTP : na, title = "Long TP", color = color.green, style = plot.style_linebr)
+
+// plot(showSLLines and strategy.position_size < 0 ? shortStop : na, title = "Short SL", color = color.red, style = plot.style_linebr)
+// plot(showTPLines and strategy.position_size < 0 ? shortTP : na, title = "Short TP", color = color.green, style = plot.style_linebr)
+
+//--------------------------------------------------------------------------------------
+// 12) RELIABLE STATS TABLE
+//--------------------------------------------------------------------------------------
+enableStats = input.bool(true, title="Show Stats Dashboard?", group=groupUI)
+var table statsTable = table.new(position.top_right, 2, 6, border_width=1)
+
+if enableStats and bar_index % 5 == 0  // refresh every 5 bars for stability
+    totalTrades = strategy.closedtrades
+    wins        = strategy.wintrades
+    losses      = strategy.losstrades
+    winRate     = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0
+    avgProfit   = totalTrades > 0 ? strategy.netprofit / totalTrades : 0.0
+    netProfit   = strategy.netprofit
+
+    // Color rules
+    colorNet    = netProfit > 0 ? color.green : color.red
+    colorWin    = winRate > 50 ? color.green : color.orange
+    colorAvg    = avgProfit > 0 ? color.green : color.red
+
+    bgcolorTable = color.new(color.black, 75)  // semi-transparent black
+
+    table.cell(statsTable, 0, 0, "Total Trades", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 0, str.tostring(totalTrades), text_color=color.white, bgcolor=bgcolorTable)
+
+    table.cell(statsTable, 0, 1, "Wins", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 1, str.tostring(wins), text_color=color.white, bgcolor=bgcolorTable)
+
+    table.cell(statsTable, 0, 2, "Losses", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 2, str.tostring(losses), text_color=color.white, bgcolor=bgcolorTable)
+
+    table.cell(statsTable, 0, 3, "Win Rate", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 3, str.tostring(winRate, "#.##") + "%", text_color=colorWin, bgcolor=bgcolorTable)
+
+    table.cell(statsTable, 0, 4, "Avg Profit", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 4, str.tostring(avgProfit, "#.##"), text_color=colorAvg, bgcolor=bgcolorTable)
+
+    table.cell(statsTable, 0, 5, "Net Profit", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 5, str.tostring(netProfit, "#.##"), text_color=colorNet, bgcolor=bgcolorTable)
