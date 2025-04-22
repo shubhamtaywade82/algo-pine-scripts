@@ -1,0 +1,141 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82
+
+//@version=6
+strategy("Supertrend Strategy with Trend & Volatility Filters", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+//────────────────────────────────────────────────────────────
+// 📊 Inputs
+//────────────────────────────────────────────────────────────
+groupSt = "Supertrend Settings"
+groupRisk = "Risk Settings"
+groupExit = "Exit Settings"
+groupUI = "Stats"
+
+atrPeriod      = input.int(10, "ATR Period", group=groupSt)
+factor         = input.float(1.5, "Supertrend Multiplier", step=0.1, group=groupSt)
+
+adxLength      = input.int(14, "ADX Length", group="Trend Filter")
+adxThreshold   = input.int(20, "ADX Threshold", group="Trend Filter")
+volMultiplier  = input.float(1.5, "Volatility Multiplier", step=0.1, group="Volatility Filter")
+
+tpMultiplier   = input.float(3.0, "Take Profit (ATR x)", group=groupExit)
+slMultiplier   = input.float(1.5, "Stop Loss (ATR x)", group=groupExit)
+useTrailStop   = input.bool(false, "Use Trailing Stop?", group=groupExit)
+
+riskPct        = input.float(1.0, "Risk % per Trade", step=0.1, group=groupRisk)
+
+enableStats    = input.bool(true, title="Show Stats Dashboard?", group=groupUI)
+
+
+
+//────────────────────────────────────────────────────────────
+// 📈 Supertrend Calculation
+//────────────────────────────────────────────────────────────
+[stValue, stDir] = ta.supertrend(factor, atrPeriod)
+isBullish = stDir < 0
+isBearish = stDir > 0
+dirChange = ta.change(stDir)
+
+plot(isBullish ? stValue : na, title="Supertrend Bullish", color=color.green, style=plot.style_linebr, linewidth=2)
+plot(isBearish ? stValue : na, title="Supertrend Bearish", color=color.red, style=plot.style_linebr, linewidth=2)
+
+
+
+// Calculate the ADX value
+[plusDI, minusDI, adxValue] = ta.dmi(adxLength, adxLength)
+//────────────────────────────────────────────────────────────
+// 🔍 Filters: Trend + Volatility
+//────────────────────────────────────────────────────────────
+[_, _, adx] = ta.dmi(adxLength, adxLength)
+volNow      = ta.atr(14)
+volAvg      = ta.sma(volNow, 100)
+
+isTrending  = adx > adxThreshold
+volOK       = volNow > (volMultiplier * volAvg)
+
+
+//────────────────────────────────────────────────────────────
+// 📥 Entry Conditions
+//────────────────────────────────────────────────────────────
+longCondition  = isBullish and dirChange < 0 and isTrending and volOK
+shortCondition = isBearish and dirChange > 0 and isTrending and volOK
+
+//────────────────────────────────────────────────────────────
+// 🛡️ Risk-Based Position Size Calculation
+//────────────────────────────────────────────────────────────
+exitATR = ta.atr(14)
+slTicks = slMultiplier * exitATR
+posVal  = (strategy.equity * riskPct / 100) / (slTicks / close)
+contracts = posVal / close
+
+
+//────────────────────────────────────────────────────────────
+// 📌 Entry Execution
+//────────────────────────────────────────────────────────────
+if longCondition
+    strategy.entry("Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Short", strategy.short)
+
+
+//────────────────────────────────────────────────────────────
+// ❌ Exit Logic: SL / TP / Trail
+//────────────────────────────────────────────────────────────
+longSL  = strategy.position_avg_price - slMultiplier * exitATR
+longTP  = strategy.position_avg_price + tpMultiplier * exitATR
+shortSL = strategy.position_avg_price + slMultiplier * exitATR
+shortTP = strategy.position_avg_price - tpMultiplier * exitATR
+
+// Exits based on ATR and Supertrend direction
+if strategy.position_size > 0
+    strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+
+//────────────────────────────────────────────────────────────
+// 🛎️ Alerts
+//────────────────────────────────────────────────────────────
+alertcondition(longCondition, title="Long Entry Signal", message="🟢 Long Entry (Supertrend Flip + Trend OK)")
+alertcondition(shortCondition, title="Short Entry Signal", message="🔴 Short Entry (Supertrend Flip + Trend OK)")
+alertcondition(strategy.position_size == 0 and strategy.position_size[1] != 0, title="Exit Triggered", message="❎ Position exited")
+
+
+//────────────────────────────────────────────────────────────
+// ✅ Entry Markers
+//────────────────────────────────────────────────────────────
+plotshape(longCondition, title="Buy", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(shortCondition, title="Sell", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+//────────────────────────────────────────────────────────────
+// 📊 Performance Table (Updated)
+//────────────────────────────────────────────────────────────
+var table stats = table.new(position.top_right, 2, 6, border_width=1)
+
+if enableStats and bar_index % 5 == 0
+    tot     = strategy.closedtrades
+    wins    = strategy.wintrades
+    loss    = strategy.losstrades
+    winRate = tot > 0 ? (wins / tot) * 100 : na
+    avgP    = tot > 0 ? strategy.netprofit / tot : na
+    netP    = strategy.netprofit
+
+    cNet  = netP > 0 ? color.green : color.red
+    cWin  = winRate > 50 ? color.green : color.orange
+    cAvg  = avgP > 0 ? color.green : color.red
+    bg    = color.new(color.black, 80)
+
+    table.cell(stats, 0, 0, "Trades", text_color=color.white, bgcolor=bg)
+    table.cell(stats, 1, 0, str.tostring(tot), text_color=color.white, bgcolor=bg)
+    table.cell(stats, 0, 1, "Wins", text_color=color.white, bgcolor=bg)
+    table.cell(stats, 1, 1, str.tostring(wins), text_color=color.white, bgcolor=bg)
+    table.cell(stats, 0, 2, "Losses", text_color=color.white, bgcolor=bg)
+    table.cell(stats, 1, 2, str.tostring(loss), text_color=color.white, bgcolor=bg)
+    table.cell(stats, 0, 3, "Winrate", text_color=color.white, bgcolor=bg)
+    table.cell(stats, 1, 3, str.tostring(winRate, "#.##") + "%", text_color=cWin, bgcolor=bg)
+    table.cell(stats, 0, 4, "Avg Profit", text_color=color.white, bgcolor=bg)
+    table.cell(stats, 1, 4, str.tostring(avgP, "#.##"), text_color=cAvg, bgcolor=bg)
+    table.cell(stats, 0, 5, "Net Profit", text_color=color.white, bgcolor=bg)
+    table.cell(stats, 1, 5, str.tostring(netP, "#.##"), text_color=cNet, bgcolor=bg)
