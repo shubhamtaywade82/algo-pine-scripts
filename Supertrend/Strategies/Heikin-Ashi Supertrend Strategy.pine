@@ -1,0 +1,94 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © shubhamtaywade82
+
+//@version=6
+strategy("Heikin-Ashi Supertrend Strategy", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// ─── INPUTS ──────────────────────────────────────────────
+atrPeriod = input.int(10, "Supertrend ATR Period", minval=1)
+atrFactor = input.float(1.2, "Supertrend ATR Factor", minval=0.1, step=0.01)
+
+// ─── CALCULATE HEIKIN-ASHI VALUES ──────────────────────────
+// HA_Close = (open + high + low + close)/4
+haClose = (open + high + low + close) / 4
+
+// For HA_Open, use (prev HA_Open + prev HA_Close)/2; for first bar, use (open+close)/2
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+
+// HA_High = max(high, HA_Open, HA_Close)
+haHigh = math.max(high, math.max(haOpen, haClose))
+// HA_Low = min(low, HA_Open, HA_Close)
+haLow = math.min(low, math.min(haOpen, haClose))
+
+// ─── CALCULATE ATR BASED ON HA VALUES ──────────────────────
+haATR = ta.atr(atrPeriod)  // Alternatively, you could compute ATR on HA values; here we keep it standard for simplicity
+
+// ─── IMPLEMENT SUPERTREND USING HA VALUES ──────────────────
+// Basic Supertrend calculation (for demonstration purposes)
+var float basicUpperBand = na
+var float basicLowerBand = na
+var float haSupertrend = na
+var int haDirection = na   // 1 for bullish, -1 for bearish
+
+// Calculate a basic median of HA_High and HA_Low as "basic price"
+basicPrice = (haHigh + haLow) / 2
+upperBand = basicPrice + atrFactor * haATR
+lowerBand = basicPrice - atrFactor * haATR
+
+// On the first bar, initialize the supertrend
+if barstate.isfirst
+    haSupertrend := upperBand
+    haDirection := 1
+
+// For subsequent bars, determine supertrend based on previous value
+if not barstate.isfirst
+    // For an uptrend, if current close is below the previous supertrend, flip to downtrend.
+    haSupertrend := haDirection == 1 ? (close > basicPrice[1] ? math.min(upperBand, haSupertrend[1]) : upperBand) : (close < basicPrice[1] ? math.max(lowerBand, haSupertrend[1]) : lowerBand)
+    haDirection := close > haSupertrend[1] ? 1 : -1
+
+// ─── STRATEGY LOGIC (SIMPLE EXAMPLE USING HA Supertrend) ─────
+longCondition = haDirection == 1 and close > haSupertrend
+shortCondition = haDirection == -1 and close < haSupertrend
+
+if longCondition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+    // For demo: use fixed stop-loss and TP calculated from current close.
+    strategy.exit("Long Exit", from_entry="Long", stop=close * 0.98, limit=close * 1.04)
+
+if shortCondition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", from_entry="Short", stop=close * 1.02, limit=close * 0.96)
+
+// ─── PLOTTING ──────────────────────────────────────────────
+plot(haSupertrend, color=haDirection == 1 ? color.green : color.red, linewidth=2, title="HA Supertrend")
+plot(haClose, color=color.blue, title="HA Close", style=plot.style_circles)
+plot(haOpen, color=color.orange, title="HA Open", style=plot.style_circles)
+
+// ---------------------------------- STATS TABLE - BACK TESTING RESULTS -------------------------
+enableStats = input.bool(true, title="Show Stats Dashboard?", group="Stats")
+var table statsTable = table.new(position.top_right, 2, 6, border_width=1)
+
+if enableStats and bar_index % 5 == 0
+    totalTrades = strategy.closedtrades
+    wins        = strategy.wintrades
+    losses      = strategy.losstrades
+    winRate     = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0
+    avgProfit   = totalTrades > 0 ? strategy.netprofit / totalTrades : 0.0
+    netProfit   = strategy.netprofit
+    colorNet    = netProfit > 0 ? color.green : color.red
+    colorWin    = winRate > 50 ? color.green : color.orange
+    colorAvg    = avgProfit > 0 ? color.green : color.red
+    bgcolorTable = color.new(color.black, 75)
+    table.cell(statsTable, 0, 0, "Total Trades", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 0, str.tostring(totalTrades), text_color=color.white, bgcolor=bgcolorTable)
+    table.cell(statsTable, 0, 1, "Wins", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 1, str.tostring(wins), text_color=color.white, bgcolor=bgcolorTable)
+    table.cell(statsTable, 0, 2, "Losses", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 2, str.tostring(losses), text_color=color.white, bgcolor=bgcolorTable)
+    table.cell(statsTable, 0, 3, "Win Rate", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 3, str.tostring(winRate, "#.##") + "%", text_color=colorWin, bgcolor=bgcolorTable)
+    table.cell(statsTable, 0, 4, "Avg Profit", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 4, str.tostring(avgProfit, "#.##"), text_color=colorAvg, bgcolor=bgcolorTable)
+    table.cell(statsTable, 0, 5, "Net Profit", text_color=color.white, bgcolor=bgcolorTable, text_halign=text.align_left)
+    table.cell(statsTable, 1, 5, str.tostring(netProfit, "#.##"), text_color=colorNet, bgcolor=bgcolorTable)
